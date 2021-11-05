@@ -1,0 +1,93 @@
+// Each training point has a field called 'landcover' containing
+// class labels at that location. The following block contains
+// construction code for the points.  Hover on the 'urban' variable
+// and click, 'Convert' in the dialog.
+
+// Load the Landsat 8 scaled radiance image collection.
+var landsatCollection = ee.ImageCollection('LANDSAT/LC08/C01/T1')
+    .filterDate('2020-01-01', '2020-12-31');
+       
+var spatialFiltered = landsatCollection.filterBounds(point)
+print('spatialFiltered', spatialFiltered);
+
+var temporalFiltered = spatialFiltered.filterDate('2020-01-01', '2020-12-31');
+print('temporalFiltered', temporalFiltered);
+// This will sort from least to most cloudy.
+var sorted = temporalFiltered.sort('CLOUD_COVER');
+
+// Get the first (least cloudy) image.
+var scene = sorted.first();
+Map.centerObject(scene, 9);
+var visParams = {bands: ['B4', 'B3', 'B2'], min: 1300, max: 12000};
+Map.addLayer(scene, visParams, 'true-color composite');
+
+// Make a cloud-free composite.
+var composite = ee.Algorithms.Landsat.simpleComposite({
+  collection: landsatCollection,
+  asFloat: true
+});
+
+// Merge the three geometry layers into a single FeatureCollection.
+var newfc = urban.merge(vegetation).merge(water);
+
+// Use these bands for classification.
+var bands = ['B2', 'B3', 'B4', 'B5', 'B6', 'B7'];
+// The name of the property on the points storing the class label.
+var classProperty = 'landcover';
+
+// Sample the composite to generate training data.  Note that the
+// class label is stored in the 'landcover' property.
+var training = composite.select(bands).sampleRegions({
+  collection: newfc,
+  properties: [classProperty],
+  scale: 30
+});
+
+// Train a CART classifier.
+var classifier = ee.Classifier.smileCart().train({
+  features: training,
+  classProperty: classProperty,
+});
+// Print some info about the classifier (specific to CART).
+print('CART, explained', classifier.explain());
+
+// Classify the composite.
+var classified = composite.classify(classifier);
+Map.centerObject(newfc);
+Map.addLayer(classified, {min: 0, max: 2, palette: ['red', 'green', 'blue']});
+
+// Optionally, do some accuracy assessment.  Fist, add a column of
+// random uniforms to the training dataset.
+var withRandom = training.randomColumn('random');
+
+// We want to reserve some of the data for testing, to avoid overfitting the model.
+var split = 0.7;  // Roughly 70% training, 30% testing.
+var trainingPartition = withRandom.filter(ee.Filter.lt('random', split));
+var testingPartition = withRandom.filter(ee.Filter.gte('random', split));
+
+// Trained with 70% of our data.
+var trainedClassifier = ee.Classifier.smileRandomForest(5).train({
+  features: trainingPartition,
+  classProperty: classProperty,
+  inputProperties: bands
+});
+
+// Classify the test FeatureCollection.
+var test = testingPartition.classify(trainedClassifier);
+var image_clip=classified.clip(Kampala)
+print('image_clip', image_clip); // debug info in console
+// Print the confusion matrix.
+var confusionMatrix = test.errorMatrix(classProperty, 'classification');
+print('Confusion Matrix', confusionMatrix);
+
+// Create a task that you can launch from the Tasks tab.
+// commented out here - but saves off geoTIFF files
+Export.image.toDrive({
+image: image_clip.clip(Kampala),
+description: 'Landcover',
+folder: 'GEE',
+fileNamePrefix: 'Landcover',
+region: Kampala,
+fileFormat: 'GEOTIFF',
+scale: 30
+});
